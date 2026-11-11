@@ -145,6 +145,24 @@ FORMATS.forEach((f) => {
   $('formats').appendChild(b);
 });
 
+// 새 배포 자동 감지: 캐시된 내 HTML과 서버의 최신 HTML을 비교해 다르면 새로고침
+// (GitHub Pages는 캐시 헤더를 바꿀 수 없어서 페이지가 직접 확인)
+async function checkForUpdate() {
+  try {
+    const url = location.origin + location.pathname;
+    const cached = await (await fetch(url)).text();                        // 브라우저가 지금 갖고 있는 버전
+    const fresh = await (await fetch(url, { cache: 'reload' })).text();    // 서버 최신본 (캐시도 갱신됨)
+    if (cached === fresh) { sessionStorage.removeItem('reloaded'); return; }
+    if (sessionStorage.getItem('reloaded')) return;                        // 무한 새로고침 방지
+    if (files.length) { setStatus('새 버전이 있어요. 작업이 끝나면 새로고침해 주세요.'); return; }
+    sessionStorage.setItem('reloaded', '1');
+    location.reload();
+  } catch (_) { /* 오프라인 등은 무시 */ }
+}
+checkForUpdate();
+addEventListener('pageshow', (e) => { if (e.persisted) checkForUpdate(); });
+document.addEventListener('visibilitychange', () => { if (!document.hidden) checkForUpdate(); });
+
 $('file').addEventListener('change', (e) => {
   files = [...e.target.files];
   e.target.value = '';
