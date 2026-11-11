@@ -44,6 +44,9 @@
   <label><input type="checkbox" data-k="shutter">셔터</label>
   <label><input type="checkbox" data-k="iso">ISO</label>
   <label><input type="checkbox" data-k="focal">초점거리</label>
+  <label style="display:flex;margin-right:0"><input type="checkbox" data-k="custom">직접 입력
+    <input id="customText" type="text" maxlength="30" placeholder="예: SEOUL 2026" autocapitalize="characters"
+           style="flex:1;min-width:0;width:auto;height:auto;padding:6px 8px;border:1px solid var(--muted);border-radius:8px;background:var(--bg);color:var(--fg);font-size:16px"></label>
 </div>
 <label class="btn" for="file">사진 선택</label>
 <input id="file" type="file" accept="image/*" multiple>
@@ -139,9 +142,11 @@ function parseTiff(v, base) {
 }
 
 // ---------- 필름 스탬프 ----------
-const STAMP_KEYS = ['date', 'make', 'model', 'aperture', 'shutter', 'iso', 'focal'];
+const STAMP_KEYS = ['date', 'make', 'model', 'aperture', 'shutter', 'iso', 'focal', 'custom'];
 const stamp = Object.fromEntries(STAMP_KEYS.map((k) => [k, false]));
 try { Object.assign(stamp, JSON.parse(localStorage.getItem('stamp') || '{}')); } catch (_) {}
+let customText = '';
+try { customText = localStorage.getItem('stampText') || ''; } catch (_) {}
 const anyStamp = () => STAMP_KEYS.some((k) => stamp[k]);
 
 const exifCache = new WeakMap();
@@ -164,6 +169,7 @@ function stampLines(x) {
   if (stamp.iso && x.iso) s.push(`ISO${x.iso}`);
   if (stamp.focal && x.focal) s.push(`${Math.round(x.focal)}MM`);
   if (s.length) a.push(s.join('    ')); // 항목 사이 넓은 간격
+  if (stamp.custom && customText.trim()) a.push(customText.trim());
   return a;
 }
 
@@ -290,13 +296,24 @@ addEventListener('pageshow', (e) => { if (e.persisted) checkForUpdate(); });
 document.addEventListener('visibilitychange', () => { if (!document.hidden) checkForUpdate(); });
 
 // 스탬프 체크박스
-document.querySelectorAll('#stamp input').forEach((cb) => {
+document.querySelectorAll('#stamp input[type=checkbox]').forEach((cb) => {
   cb.checked = !!stamp[cb.dataset.k];
   cb.addEventListener('change', () => {
     stamp[cb.dataset.k] = cb.checked;
     try { localStorage.setItem('stamp', JSON.stringify(stamp)); } catch (_) {}
     processAll();
   });
+});
+
+// 직접 입력 텍스트 (입력이 멈추면 반영)
+let textTimer;
+$('customText').value = customText;
+$('customText').addEventListener('input', (e) => {
+  customText = e.target.value;
+  try { localStorage.setItem('stampText', customText); } catch (_) {}
+  if (!stamp.custom) return;
+  clearTimeout(textTimer);
+  textTimer = setTimeout(processAll, 500);
 });
 
 $('file').addEventListener('change', (e) => {
