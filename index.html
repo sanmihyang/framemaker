@@ -20,6 +20,10 @@
   #status { font-size:14px; color:var(--muted); margin:12px 0; min-height:20px; }
   #grid { display:grid; grid-template-columns:repeat(2,1fr); gap:8px; margin-top:12px; }
   #grid img { width:100%; border-radius:8px; background:var(--card); }
+  #stamp { margin:12px 0 4px; padding:12px; border-radius:12px; background:var(--card); }
+  #stamp .t { font-size:13px; color:var(--muted); margin-bottom:8px; }
+  #stamp label { display:inline-flex; align-items:center; gap:6px; margin:0 14px 8px 0; font-size:15px; }
+  #stamp input { width:18px; height:18px; accent-color:var(--accent); }
   .hint { font-size:12px; color:var(--muted); margin-top:8px; }
   #formats { display:flex; flex-wrap:wrap; gap:8px; margin:8px 0 4px; }
   #formats button { width:auto; margin:0; padding:9px 14px; font-size:15px; background:var(--card); color:var(--fg); }
@@ -31,6 +35,16 @@
 <p class="sub">사진에 흰색 프레임을 입힙니다. 비율/스타일을 선택하세요. 모든 처리는 기기 안에서만 이루어집니다.</p>
 
 <div id="formats" role="group" aria-label="프레임 형식"></div>
+<div id="stamp">
+  <div class="t">필름 카메라 스탬프 · 우측 하단 (사진의 EXIF 정보)</div>
+  <label><input type="checkbox" data-k="date">촬영일</label>
+  <label><input type="checkbox" data-k="make">제조사</label>
+  <label><input type="checkbox" data-k="model">카메라</label>
+  <label><input type="checkbox" data-k="aperture">조리개</label>
+  <label><input type="checkbox" data-k="shutter">셔터</label>
+  <label><input type="checkbox" data-k="iso">ISO</label>
+  <label><input type="checkbox" data-k="focal">초점거리</label>
+</div>
 <label class="btn" for="file">사진 선택</label>
 <input id="file" type="file" accept="image/*" multiple>
 <button id="save" class="secondary" disabled>사진첩에 저장</button>
@@ -77,6 +91,113 @@ function layout(w, h, fmt) {
   return { W, H, x: (W - w) / 2, y: (H - h) / 2 };
 }
 
+// ---------- EXIF (JPEG) ----------
+async function readExif(file) {
+  try {
+    const v = new DataView(await file.slice(0, 256 * 1024).arrayBuffer());
+    if (v.getUint16(0) !== 0xFFD8) return {};
+    let off = 2;
+    while (off + 4 < v.byteLength) {
+      const marker = v.getUint16(off), len = v.getUint16(off + 2);
+      if (marker === 0xFFE1 && v.getUint32(off + 4) === 0x45786966) return parseTiff(v, off + 10);
+      if ((marker & 0xFF00) !== 0xFF00 || marker === 0xFFDA) break;
+      off += 2 + len;
+    }
+  } catch (e) { /* EXIF 없음/손상 */ }
+  return {};
+}
+function parseTiff(v, base) {
+  const le = v.getUint16(base) === 0x4949;
+  const g16 = (o) => v.getUint16(o, le), g32 = (o) => v.getUint32(o, le);
+  const SZ = { 1: 1, 2: 1, 3: 2, 4: 4, 5: 8, 7: 1 };
+  const readIFD = (off) => {
+    const out = {};
+    const n = g16(off);
+    for (let i = 0; i < n; i++) {
+      const e = off + 2 + i * 12;
+      const tag = g16(e), type = g16(e + 2), cnt = g32(e + 4);
+      const size = (SZ[type] || 1) * cnt;
+      const vo = size > 4 ? base + g32(e + 8) : e + 8;
+      if (type === 2) {
+        let str = '';
+        for (let k = 0; k < cnt; k++) { const c = v.getUint8(vo + k); if (!c) break; str += String.fromCharCode(c); }
+        out[tag] = str.trim();
+      } else if (type === 3) out[tag] = g16(vo);
+      else if (type === 4) out[tag] = g32(vo);
+      else if (type === 5) { const d = g32(vo + 4); out[tag] = d ? g32(vo) / d : 0; }
+    }
+    return out;
+  };
+  const ifd0 = readIFD(base + g32(base + 4));
+  const exif = ifd0[0x8769] ? readIFD(base + ifd0[0x8769]) : {};
+  return {
+    make: ifd0[0x010F] || '',
+    model: ifd0[0x0110] || '',
+    date: exif[0x9003] || ifd0[0x0132] || '',
+    exposure: exif[0x829A], fnumber: exif[0x829D], iso: exif[0x8827], focal: exif[0x920A],
+  };
+}
+
+// ---------- 필름 스탬프 ----------
+const STAMP_KEYS = ['date', 'make', 'model', 'aperture', 'shutter', 'iso', 'focal'];
+const stamp = Object.fromEntries(STAMP_KEYS.map((k) => [k, false]));
+try { Object.assign(stamp, JSON.parse(localStorage.getItem('stamp') || '{}')); } catch (_) {}
+const anyStamp = () => STAMP_KEYS.some((k) => stamp[k]);
+
+const exifCache = new WeakMap();
+async function getExif(file) {
+  if (!exifCache.has(file)) exifCache.set(file, await readExif(file));
+  return exifCache.get(file);
+}
+
+function stampLines(x) {
+  const a = [];
+  if (stamp.date) { const m = /^(\d{4}):(\d\d):(\d\d)/.exec(x.date || ''); if (m) a.push(`${m[1]}.${m[2]}.${m[3]}`); }
+  // 제조사+기종은 한 줄로. 기종명에 제조사가 이미 들어 있으면(예: "Canon EOS R5") 중복 제거
+  const make = stamp.make ? (x.make || '') : '';
+  const model = stamp.model ? (x.model || '') : '';
+  const cam = (make && model && model.toLowerCase().startsWith(make.toLowerCase().split(' ')[0])) ? model : `${make} ${model}`.trim();
+  if (cam) a.push(cam);
+  const s = [];
+  if (stamp.aperture && x.fnumber) s.push(`F${(Math.round(x.fnumber * 10) / 10).toString()}`);
+  if (stamp.shutter && x.exposure) s.push(x.exposure < 1 ? `1/${Math.round(1 / x.exposure)}` : `${Math.round(x.exposure * 10) / 10}"`);
+  if (stamp.iso && x.iso) s.push(`ISO${x.iso}`);
+  if (stamp.focal && x.focal) s.push(`${Math.round(x.focal)}MM`);
+  if (s.length) a.push(s.join('    ')); // 항목 사이 넓은 간격
+  return a;
+}
+
+const FONT_URL = 'https://cdn.jsdelivr.net/npm/dseg@0.46.0/fonts/DSEG14-Classic/DSEG14Classic-Regular.woff2';
+let fontReady = null;
+function loadStampFont() {
+  if (!fontReady) fontReady = (async () => {
+    try { const f = new FontFace('DSEG14', `url(${FONT_URL})`); await f.load(); document.fonts.add(f); return true; }
+    catch (e) { console.warn('스탬프 폰트 로딩 실패, 기본 폰트 사용', e); return false; }
+  })();
+  return fontReady;
+}
+
+// 사진 영역(px,py,pw,ph) 우측 하단에 주황색 데이트백 스타일로 그림
+function drawStamp(ctx, lines, px, py, pw, ph, fontOk) {
+  if (!lines.length) return;
+  const fs = Math.max(10, Math.round(Math.min(pw, ph) * 0.03));
+  const gap = fs * 0.5, m = fs * 1.4;
+  ctx.font = fontOk ? `${fs}px DSEG14` : `bold ${fs}px ui-monospace, Menlo, monospace`;
+  if ('letterSpacing' in ctx) ctx.letterSpacing = `${(fs * 0.12).toFixed(1)}px`; // 글자 간격
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'alphabetic';
+  ctx.fillStyle = '#ff8a1f';
+  ctx.shadowColor = 'rgba(255,90,0,.75)';
+  ctx.shadowBlur = fs * 0.45;
+  let y = py + ph - m;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    ctx.fillText(lines[i].toUpperCase(), px + pw - m, y);
+    y -= fs + gap;
+  }
+  ctx.shadowBlur = 0;
+  if ('letterSpacing' in ctx) ctx.letterSpacing = '0px';
+}
+
 async function frameImage(file, fmt) {
   // imageOrientation: 'from-image' → EXIF 회전 반영
   const bmp = await createImageBitmap(file, { imageOrientation: 'from-image' });
@@ -92,6 +213,11 @@ async function frameImage(file, fmt) {
   ctx.imageSmoothingQuality = 'high';
   ctx.drawImage(bmp, Math.round(L.x * scale), Math.round(L.y * scale),
                 Math.round(bmp.width * scale), Math.round(bmp.height * scale));
+  if (anyStamp()) {
+    const fontOk = await loadStampFont();
+    drawStamp(ctx, stampLines(await getExif(file)), Math.round(L.x * scale), Math.round(L.y * scale),
+              Math.round(bmp.width * scale), Math.round(bmp.height * scale), fontOk);
+  }
   bmp.close();
 
   const blob = await new Promise((res) => canvas.toBlob(res, 'image/jpeg', 0.92));
@@ -162,6 +288,16 @@ async function checkForUpdate() {
 checkForUpdate();
 addEventListener('pageshow', (e) => { if (e.persisted) checkForUpdate(); });
 document.addEventListener('visibilitychange', () => { if (!document.hidden) checkForUpdate(); });
+
+// 스탬프 체크박스
+document.querySelectorAll('#stamp input').forEach((cb) => {
+  cb.checked = !!stamp[cb.dataset.k];
+  cb.addEventListener('change', () => {
+    stamp[cb.dataset.k] = cb.checked;
+    try { localStorage.setItem('stamp', JSON.stringify(stamp)); } catch (_) {}
+    processAll();
+  });
+});
 
 $('file').addEventListener('change', (e) => {
   files = [...e.target.files];
